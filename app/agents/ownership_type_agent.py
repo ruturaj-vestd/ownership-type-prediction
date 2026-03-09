@@ -125,11 +125,15 @@ Return strict JSON:
 
         return OwnershipOutput(
             company_name=web_output.company or "[unverified]",
-            domain=web_output.domain,
-            legal_entity=web_output.legal_entity or "[unverified]",
+            official_domain=web_output.domain,
+            legal_entity_name=web_output.legal_entity or "[unverified]",
+            company_number="",
             ownership_type=ownership_type,
-            rationale=rationale,
             confidence=confidence,
+            needs_review=ownership_type in {"Unknown", "Needs Review"},
+            review_reason="" if ownership_type not in {"Unknown", "Needs Review"} else "Legacy classifier uncertainty",
+            reasoning_summary=rationale,
+            ownership_facts={},
             citations=list(dict.fromkeys(citations)),
             conflicts=list(dict.fromkeys([x for x in conflicts if x])),
             flags=list(dict.fromkeys([x for x in flags if x])),

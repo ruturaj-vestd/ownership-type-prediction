@@ -212,9 +212,10 @@ class WebResearchAgent:
         search_query = str(plan.get("search_query") or "").strip() or f"{company} official website legal entity legal notice"
 
         web_prompt = (
-            "Use web search to gather official domain + legal entity evidence."
+            "Use web search to EXTRACT FACTS ONLY for official domain and legal entity resolution."
             f"\nCompany: {search_query}\n"
-            "Return summary, citations URLs, candidate domains, candidate legal entities, and conflicts."
+            "Do not conclude ownership type. Return evidence snippets, citations, candidate domains, legal entities, and confidence cues."
+            "Never treat registry/document-host/social URLs as official domains."
         )
         evidence_text = openai_responses_text(
             model=self.model,
@@ -256,6 +257,7 @@ class WebResearchAgent:
         final_prompt = (
             FINAL_VERBATIM_PROMPT
             + "\nAdditionally include in notes lines starting with 'conflicts:' and 'flags:' only in notes field."
+            + "\nIf uncertain, keep confidence low and use [unverified] for legal_entity instead of guessing."
             + f"\n\nCOMPANY\n{company}\n\nWEB EVIDENCE\n{evidence_text}\n{site_evidence}\nReturn ONLY JSON object."
         )
         final = safe_json_parse_strict(
