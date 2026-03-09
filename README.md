@@ -27,6 +27,24 @@ export CH_API_KEY="your-companies-house-api-key"
 streamlit run streamlit_app.py
 ```
 
+The UI supports two modes:
+- **Single company** input
+- **Excel upload** (`.xlsx`) with exactly these 8 columns (same order):
+  1. Company Name
+  2. Job Title
+  3. No. of Employees
+  4. Employees Based
+  5. BU Size
+  6. Domain Name
+  7. Legal Entity
+  8. Ownership Type
+
+For Excel mode, the app processes rows one-by-one and fills:
+- Domain Name
+- Legal Entity
+- Ownership Type
+- Extra reasoning column: **Ownership Reasoning (Structured)**
+
 ## Run CLI
 
 ```bash
