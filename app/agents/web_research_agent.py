@@ -4,7 +4,6 @@ import math
 import re
 from typing import Any
 
-
 from app.models import WebAgentOutput
 from app.utils.docx import read_docx_text
 from app.utils.http import http_get_text
@@ -12,29 +11,6 @@ from app.utils.openai_client import openai_responses_text, safe_json_parse_stric
 
 OPENAI_MODEL = "gpt-5.2"
 PROTOCOL_DOCX_PATH = "./Research Protocol Checklist — v6.docx"
-
-FINAL_VERBATIM_PROMPT = """
-You are a company research analyst enriching a spreadsheet.
-
-Determine:
-- Official website domain
-- Verified legal entity name
-
-Rules:
-- Do NOT guess.
-- domain must be the official company website.
-- legal_entity must match official wording; if unclear append "[unverified]".
-
-Return STRICT JSON ONLY with exactly this schema:
-{
-  "domain": "string",
-  "legal_entity": "string",
-  "ownership_type": "Unknown",
-  "citations": ["url", "..."],
-  "confidence": number,
-  "notes": "string"
-}
-""".strip()
 
 COMMON_PATHS = [
     "/",
@@ -95,6 +71,7 @@ def is_probably_social_or_directory(domain: str) -> bool:
         "wikipedia.org",
         "companieshouse.gov.uk",
         "find-and-update.company-information.service.gov.uk",
+        "document-api.company-information.service.gov.uk",
         "opencorporates.com",
         "bloomberg.com",
         "crunchbase.com",
@@ -171,7 +148,7 @@ def probe_domain_for_legal(domain: str, company_hint: str) -> dict[str, Any]:
         checked.append(url)
         if code and 200 <= code < 400 and txt:
             reachable += 1
-            all_text += "\n\n" + txt[:250000]
+            all_text += "\n\n" + txt[:120000]
     company_numbers = extract_company_numbers_uk(all_text)
     trading = extract_trading_name_disclosures(all_text)
     legal_snips = extract_legal_name_candidates(all_text)
@@ -195,38 +172,41 @@ class WebResearchAgent:
         rules = read_docx_text(protocol_docx_path, keep_blank_lines=True)
         self.system_guardrails = (
             "You must follow the Research Protocol Checklist below EXACTLY.\n"
-            "- Do not invent facts.\n- Do not guess.\n- Prefer primary sources.\n"
-            "- If evidence conflicts, flag it.\n- JSON means strict JSON only.\n\n"
+            "- Extract facts only.\n- Do not guess.\n- Prefer primary sources.\n"
+            "- Return strict JSON only.\n\n"
             f"RESEARCH PROTOCOL CHECKLIST:\n{rules}"
         )
 
     def run(self, company: str) -> WebAgentOutput:
-        planner_prompt = (
-            "Return STRICT JSON ONLY. Generate one robust web query.\n"
-            f"Company: {company}\n"
-            "Output: {\"search_query\":\"string\",\"focus_points\":[\"string\"]}"
-        )
-        plan = safe_json_parse_strict(
-            openai_responses_text(model=self.model, messages=[{"role": "system", "content": self.system_guardrails}, {"role": "user", "content": planner_prompt}])
-        )
-        search_query = str(plan.get("search_query") or "").strip() or f"{company} official website legal entity legal notice"
-
-        web_prompt = (
-            "Use web search to EXTRACT FACTS ONLY for official domain and legal entity resolution."
-            f"\nCompany: {search_query}\n"
-            "Do not conclude ownership type. Return evidence snippets, citations, candidate domains, legal entities, and confidence cues."
-            "Never treat registry/document-host/social URLs as official domains."
-        )
-        evidence_text = openai_responses_text(
-            model=self.model,
-            messages=[{"role": "system", "content": self.system_guardrails}, {"role": "user", "content": web_prompt}],
-            tools=[{"type": "web_search"}],
+        single_prompt = (
+            "Use web_search and return STRICT JSON ONLY for official domain + legal entity fact extraction. "
+            "Never choose registry/document-host/social URLs as official domain. "
+            f"Company: {company}. "
+            "Schema: {\"search_query\":\"string\",\"domain\":\"string\",\"legal_entity\":\"string\",\"citations\":[\"url\"],\"confidence\":number,\"notes\":\"string\"}"
         )
 
-        raw_domains = extract_domains_from_text(evidence_text)
-        candidate_domains = [d for d in raw_domains if not is_probably_social_or_directory(d)][:8]
+        extracted = safe_json_parse_strict(
+            openai_responses_text(
+                model=self.model,
+                messages=[{"role": "system", "content": self.system_guardrails}, {"role": "user", "content": single_prompt}],
+                tools=[{"type": "web_search"}],
+            )
+        )
+
+        search_query = str(extracted.get("search_query") or f"{company} official website legal entity legal notice").strip()
+        domain = normalize_domain(str(extracted.get("domain") or ""))
+        legal_entity = str(extracted.get("legal_entity") or "").strip()
+        citations = [str(x).strip() for x in (extracted.get("citations") or []) if str(x).strip()]
+        confidence = clamp01(extracted.get("confidence"), 0.0)
+        notes = str(extracted.get("notes") or "")
+
+        text_for_domains = "\n".join([domain] + citations + [notes])
+        raw_domains = extract_domains_from_text(text_for_domains)
+        candidate_domains = [d for d in raw_domains if not is_probably_social_or_directory(d)][:5]
+        if domain and domain not in candidate_domains and not is_probably_social_or_directory(domain):
+            candidate_domains.insert(0, domain)
+
         domain_probe_results = {d: probe_domain_for_legal(d, company) for d in candidate_domains}
-
         best_domain, best_score = "", -1.0
         for d, res in domain_probe_results.items():
             if float(res.get("score", 0)) > best_score:
@@ -244,51 +224,18 @@ class WebResearchAgent:
             website_company_numbers = primary_numbers or best_res.get("company_numbers", [])
             website_legal_name_snippets = best_res.get("legal_name_snippets", [])
 
-        site_evidence = ""
-        if best_domain:
-            site_evidence = (
-                f"\nPRIMARY SOURCE ({best_domain}) pages:\n" + "\n".join(site_pages_checked[:15])
-                + "\nSignals:\n"
-                + f"Company numbers: {website_company_numbers}\n"
-                + f"Trading disclosures: {website_trading_disclosures}\n"
-                + f"Legal-name snippets: {website_legal_name_snippets}\n"
-            )
-
-        final_prompt = (
-            FINAL_VERBATIM_PROMPT
-            + "\nAdditionally include in notes lines starting with 'conflicts:' and 'flags:' only in notes field."
-            + "\nIf uncertain, keep confidence low and use [unverified] for legal_entity instead of guessing."
-            + f"\n\nCOMPANY\n{company}\n\nWEB EVIDENCE\n{evidence_text}\n{site_evidence}\nReturn ONLY JSON object."
-        )
-        final = safe_json_parse_strict(
-            openai_responses_text(model=self.model, messages=[{"role": "system", "content": self.system_guardrails}, {"role": "user", "content": final_prompt}])
-        )
-
-        domain = normalize_domain(str(final.get("domain") or ""))
-        legal_entity = str(final.get("legal_entity") or "").strip()
-        citations = [str(x).strip() for x in (final.get("citations") or []) if str(x).strip()]
-        confidence = clamp01(final.get("confidence"), 0.0)
-        notes = str(final.get("notes") or "")
-        conflicts, flags = [], []
-        for line in notes.splitlines():
-            if line.lower().startswith("conflicts:"):
-                conflicts.append(line.split(":", 1)[1].strip())
-            if line.lower().startswith("flags:"):
-                flags.append(line.split(":", 1)[1].strip())
-
         if best_domain and best_domain != domain:
-            flags.append(f"domain_overridden_by_probe:{domain or '[none]'}->{best_domain}")
             domain = best_domain
             confidence = min(max(confidence, 0.6), 0.9)
 
-        if website_trading_disclosures or website_company_numbers:
-            if website_trading_disclosures:
-                legal_entity = website_trading_disclosures[0] + (f" | company_numbers_found={', '.join(website_company_numbers)}" if website_company_numbers else "")
-                flags.append("legal_entity_from_website_disclosure")
-            else:
-                legal_entity = (legal_entity + " " if legal_entity else "") + f"(company_numbers_found={', '.join(website_company_numbers)})"
-                flags.append("company_numbers_found_on_site")
+        if website_trading_disclosures:
+            legal_entity = website_trading_disclosures[0] + (
+                f" | company_numbers_found={', '.join(website_company_numbers)}" if website_company_numbers else ""
+            )
+        elif website_company_numbers and legal_entity:
+            legal_entity = f"{legal_entity} (company_numbers_found={', '.join(website_company_numbers)})"
 
+        flags = []
         if not domain:
             flags.append("domain_missing_or_invalid")
             confidence = min(confidence, 0.35)
@@ -303,7 +250,7 @@ class WebResearchAgent:
         return WebAgentOutput(
             company=company,
             search_query=search_query,
-            evidence_text=evidence_text,
+            evidence_text=str(extracted),
             candidate_domains=candidate_domains,
             domain_probe_results=domain_probe_results,
             site_pages_checked=site_pages_checked,
@@ -315,7 +262,12 @@ class WebResearchAgent:
             citations=citations,
             confidence=confidence,
             notes=notes,
-            conflicts=[c for c in conflicts if c],
-            flags=[f for f in flags if f],
-            log=[f"Planner query: {search_query}", f"Best domain: {best_domain or '[none]'} score={best_score:.2f}", f"Website company numbers: {website_company_numbers}", f"Final domain: {domain}"],
+            conflicts=[],
+            flags=flags,
+            log=[
+                "OpenAI calls for web agent: 1",
+                f"Best domain: {best_domain or '[none]'} score={best_score:.2f}",
+                f"Website company numbers: {website_company_numbers}",
+                f"Final domain: {domain}",
+            ],
         )

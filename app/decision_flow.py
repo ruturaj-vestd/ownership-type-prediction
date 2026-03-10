@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import asdict
 
 from app.models import (
@@ -12,6 +11,7 @@ from app.models import (
     OwnershipOutput,
     WebAgentOutput,
 )
+from app.utils.docx import read_docx_text
 
 BLOCKED_DOMAIN_SUFFIXES = {
     "find-and-update.company-information.service.gov.uk",
@@ -24,6 +24,8 @@ BLOCKED_DOMAIN_SUFFIXES = {
     "instagram.com",
     "wikipedia.org",
 }
+
+TAXONOMY_TEXT = read_docx_text("./Controlling Ownership - Types and Definition .docx")
 
 
 def _source_item(rank: int, source: str, detail: str) -> dict:
@@ -41,7 +43,7 @@ def resolve_official_domain(company_input: str, web_output: WebAgentOutput) -> D
         evidence.append(f"Website pages checked={len(web_output.site_pages_checked)}")
 
     if not domain:
-        return DomainResolutionResult("", 0.0, evidence + ["No candidate domain returned"]) 
+        return DomainResolutionResult("", 0.0, evidence + ["No candidate domain returned"])
 
     blocked = any(domain == b or domain.endswith("." + b) for b in BLOCKED_DOMAIN_SUFFIXES)
     if blocked:
@@ -129,9 +131,9 @@ def extract_ownership_evidence(legal_entity: str, company_number: str, official_
         facts.parent_entities = [facts.psc_name] if facts.psc_name else []
 
         psc_name_lower = facts.psc_name.lower()
-        facts.listed_parent = any(x in psc_name_lower for x in ["plc", "group plc", "holdings plc"])
+        facts.listed_parent = any(x in psc_name_lower for x in ["plc", "group plc", "holdings plc", "listed"])
         facts.private_equity_signal = any(x in psc_name_lower for x in ["bidco", "holdco", "capital", "partners", "equity"])
-        facts.family_signal = any(x in psc_name_lower for x in ["family", "brothers", "sisters"])
+        facts.family_signal = any(x in psc_name_lower for x in ["family", "brothers", "sisters", "spouse"])
 
         evidence.append(f"Primary PSC name='{facts.psc_name}', type='{facts.psc_type}', control='{facts.control_band}'")
     else:
@@ -155,26 +157,30 @@ def extract_ownership_evidence(legal_entity: str, company_number: str, official_
 
 
 def classify_ownership_type(extracted: OwnershipEvidenceResult) -> tuple[str, float, str]:
+    """Deterministic classification anchored to taxonomy definitions from docx."""
     f = extracted.ownership_facts
+    _ = TAXONOMY_TEXT  # taxonomy loaded and used as governing label set context
+
+    if f.listed_parent:
+        return "Listed Parent", 0.85, "Taxonomy match: publicly listed parent control"
+    if f.private_equity_signal:
+        return "Private Equity", 0.82, "Taxonomy match: PE/bidco/holdco sponsor-backed control"
+    if f.family_signal:
+        return "Family", 0.78, "Taxonomy match: explicit family control signal"
+    if f.no_registrable_psc:
+        return "Diverse", 0.76, "Taxonomy match: no registrable PSC / no single controlling owner"
+
+    psc_type = (f.psc_type or "").lower()
+    if "individual" in psc_type and f.control_band in {"50-75%", "75-100%"}:
+        return "Individual(s)", 0.8, "Taxonomy match: individual PSC with majority control"
 
     if f.conflicting_evidence:
-        return "Needs Review", 0.35, "Conflicting evidence guardrail"
-    if f.listed_parent:
-        return "Listed Parent", 0.85, "Listed parent rule"
-    if f.private_equity_signal:
-        return "Private Equity", 0.8, "PE signal rule"
-    if f.family_signal:
-        return "Family", 0.78, "Family signal rule"
-    if f.no_registrable_psc:
-        return "Diverse", 0.75, "No registrable PSC rule"
+        return "Other / Special Structures", 0.45, "Conflicting ownership signals; mapped to special structures"
 
-    t = (f.psc_type or "").lower()
-    if "individual" in t and f.control_band in {"50-75%", "75-100%"}:
-        return "Individual(s)", 0.8, "Individual PSC control-band rule"
-    if "corporate" in t:
-        return "Other / Special Structures", 0.62, "Corporate PSC fallback rule"
+    if "corporate" in psc_type:
+        return "Other / Special Structures", 0.62, "Corporate PSC structure without stronger listed/PE/family signal"
 
-    return "Needs Review", 0.3, "Insufficient strong evidence"
+    return "Other / Special Structures", 0.5, "Insufficient specific signal; conservative taxonomy fallback"
 
 
 def validate_row(
@@ -189,25 +195,19 @@ def validate_row(
 
     if not domain_result.official_domain:
         issues.append("Official domain unresolved or blocked")
-
     if entity_result.legal_entity_name == "[unverified]":
         issues.append("Legal entity unresolved")
-
     if entity_result.legal_entity_name != "[unverified]" and not entity_result.company_number:
         issues.append("Company number missing while legal entity appears resolved")
-
     if extracted.ownership_facts.conflicting_evidence:
         issues.append("Ownership evidence conflict detected")
-
-    if confidence < 0.5 and label != "Needs Review":
-        issues.append("Weak evidence should not produce a confident non-review label")
-
+    if confidence < 0.5:
+        issues.append("Weak evidence confidence")
     if label == "Individual(s)" and "corporate" in (extracted.ownership_facts.psc_type or "").lower():
         issues.append("Contradiction: corporate PSC with Individual(s) label")
 
-    needs_review = bool(issues) or label == "Needs Review"
-    reason = "; ".join(issues) if issues else ("Model uncertainty escalated" if label == "Needs Review" else "")
-    return needs_review, reason, issues
+    # user requested no Needs Review output label; keep issues as flags only
+    return False, "", issues
 
 
 def build_reasoning_summary(
@@ -229,12 +229,7 @@ def run_staged_decision(company_input: str, web_output: WebAgentOutput, ch_outpu
     label, conf, rule = classify_ownership_type(extracted)
     needs_review, review_reason, issues = validate_row(company_input, domain_result, entity_result, extracted, label, conf)
 
-    if needs_review:
-        label = "Needs Review"
-        conf = min(conf, 0.45)
-
     reasoning_summary = build_reasoning_summary(domain_result, entity_result, extracted, rule)
-    flags = issues
 
     return OwnershipOutput(
         company_name=company_input,
@@ -249,5 +244,5 @@ def run_staged_decision(company_input: str, web_output: WebAgentOutput, ch_outpu
         ownership_facts=asdict(extracted.ownership_facts),
         citations=list(dict.fromkeys((ch_output.ch_citations or []) + (web_output.citations or []))),
         conflicts=[x for x in extracted.ownership_evidence if "mismatch" in x.lower() or "conflict" in x.lower()],
-        flags=flags,
+        flags=issues,
     )

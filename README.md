@@ -59,7 +59,7 @@ Stages:
 2. `resolve_legal_entity(company_input, official_domain)`
 3. `extract_ownership_evidence(legal_entity, company_number, official_domain)`
 4. `classify_ownership_type(extracted_evidence)` (deterministic rules)
-5. `validate_row(enrichment_result)` (contradiction checks -> `needs_review`)
+5. `validate_row(enrichment_result)` (contradiction checks -> flags)
 
 Source ranking priority:
 1. Companies House PSC / filings
@@ -77,9 +77,8 @@ Deterministic labels used:
 - Listed Parent
 - Diverse
 - Other / Special Structures
-- Needs Review
 
-When evidence conflicts or resolution is weak, the pipeline forces **Needs Review**.
+When evidence conflicts or resolution is weak, the pipeline deterministically falls back to **Other / Special Structures** while surfacing flags.
 
 ## Assumptions
 
