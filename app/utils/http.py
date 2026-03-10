@@ -13,8 +13,12 @@ def http_request(method: str, url: str, *, headers: dict[str, str] | None = None
             return r.status, r.read().decode("utf-8", errors="ignore")
     except HTTPError as e:
         return e.code, e.read().decode("utf-8", errors="ignore")
-    except URLError as e:
-        raise RuntimeError(str(e)) from e
+    except URLError:
+        return 0, ""
+    except TimeoutError:
+        return 0, ""
+    except OSError:
+        return 0, ""
 
 
 def http_get_text(url: str, timeout: int = 20, headers: dict[str, str] | None = None) -> tuple[int, str]:
