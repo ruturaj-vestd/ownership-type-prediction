@@ -29,7 +29,7 @@ def _basic_auth_header(api_key: str) -> dict[str, str]:
 
 class CompaniesHouseAgent:
     def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or os.getenv("CH_API_KEY")
+        self.api_key = "3a812851-46a4-4641-bea7-5e5d6f853abf"
         if not self.api_key:
             raise RuntimeError("Missing CH_API_KEY env var")
 

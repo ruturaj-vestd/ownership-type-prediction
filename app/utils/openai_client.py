@@ -10,7 +10,7 @@ OPENAI_URL = "https://api.openai.com/v1/responses"
 
 
 def openai_responses_text(*, model: str, messages: list[dict], tools: list[dict] | None = None, api_key: str | None = None) -> str:
-    key = api_key or os.getenv("OPENAI_API_KEY")
+    key = "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"
     if not key:
         raise RuntimeError("Missing OPENAI_API_KEY env var")
     payload: dict = {"model": model, "input": messages}
